@@ -1,0 +1,8 @@
+{
+  "name": "mlb-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Radar de partidos MLB con datos de TeamRankings.com",
+  "engines": { "node": ">=18" }
+}
