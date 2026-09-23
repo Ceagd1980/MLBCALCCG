@@ -136,44 +136,42 @@ function parseSchedule(html) {
 }
 
 // ---------- tabla de posiciones (6 divisiones) ----------
-const DIV_RE = /\b(AL|NL|American League|National League)\s*(East|Central|West)\b/gi;
-const FALLBACK_DIVS = ["AL East", "AL Central", "AL West", "NL East", "NL Central", "NL West"];
-
-function divName(raw) {
-  const m = /(AL|NL|American League|National League)\s*(East|Central|West)/i.exec(raw || "");
-  if (!m) return null;
-  const lg = /^a/i.test(m[1]) ? "AL" : "NL";
-  const zone = { east: "Este", central: "Central", west: "Oeste" }[m[2].toLowerCase()];
-  return `${lg} ${zone}`;
-}
+const ZONE = { east: "Este", central: "Central", west: "Oeste" };
 
 function parseStandings(html) {
   const isHdr = (r) => r.some((c) => /streak/i.test(c)) && r.some((c) => /pct/i.test(c));
   const tables = parseTables(html).filter((t) => t.rows.some(isHdr));
   const map = {};
   tables.forEach((t, ti) => {
-    const hdr = t.rows.find(isHdr);
-    // División: 1) en la cabecera de la tabla, 2) en el texto justo antes, 3) por orden
-    let div = divName(hdr.join(" "));
-    if (!div) {
-      const before = html.slice(Math.max(0, t.index - 2500), t.index);
-      const all = [...before.matchAll(DIV_RE)];
-      if (all.length) div = divName(all[all.length - 1][0]);
-    }
-    if (!div) div = divName(FALLBACK_DIVS[ti] || "") || `Grupo ${ti + 1}`;
+    // Liga de la tabla: texto previo a la tabla; si no aparece, por orden (1ª AL, 2ª NL)
+    const before = html.slice(Math.max(0, t.index - 2500), t.index);
+    const lgAll = [...before.matchAll(/\b(American League|National League|AL|NL)\b/g)];
+    const league = lgAll.length ? (/^A/.test(lgAll[lgAll.length - 1][1]) ? "AL" : "NL") : ti % 2 === 0 ? "AL" : "NL";
 
+    const hdr = t.rows.find(isHdr);
     const idx = (re) => hdr.findIndex((c) => re.test(c));
     let iT = idx(/^team$/i);
     if (iT < 0) iT = 0;
     const iRank = idx(/^rank$/i), iWL = idx(/overall|^w-l$/i), iPct = idx(/^pct$/i),
       iStreak = idx(/streak/i);
 
-    let pos = 0;
+    // Las filas de título ("AL East", "NL West"...) marcan la división y reinician la posición
+    let div = null, pos = 0;
+    const setDiv = (text) => {
+      const m = /(?:\b(American League|National League|AL|NL)\s*)?\b(East|Central|West)\b/i.exec(text);
+      if (!m) return;
+      const lg = m[1] ? (/^a/i.test(m[1]) ? "AL" : "NL") : league;
+      div = `${lg} ${ZONE[m[2].toLowerCase()]}`;
+      pos = 0;
+    };
+
     for (const r of t.rows) {
-      if (isHdr(r) || !r[iT] || r.length < 3) continue;
+      const isLabel = isHdr(r) || r.length < 3 || r.every((c) => !/\d/.test(c));
+      if (isLabel) { setDiv(r.join(" ")); continue; }
+      if (!r[iT]) continue;
       pos++;
       map[key(r[iT])] = {
-        team: r[iT], pos, div,
+        team: r[iT], pos, div: div || league,
         powerRank: iRank >= 0 ? num(r[iRank]) : null,
         record: iWL >= 0 ? r[iWL] : "",
         pct: iPct >= 0 ? num(r[iPct]) : null,
