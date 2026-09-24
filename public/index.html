@@ -59,6 +59,19 @@ main{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:
 .line b{font:700 20px Oswald;color:var(--amber)}
 .line span{color:var(--dim);font-size:13px}
 .sep{height:8px}
+.pl{border-top:1px solid var(--line);padding:9px 12px 11px}
+.pl h4{margin:0 0 4px;font:600 13px "Barlow Semi Condensed";color:var(--dim)}
+.pl table{width:100%;border-collapse:collapse;font-size:13px}
+.pl th{font-weight:600;color:var(--dim);font-size:12px;text-align:right;padding:2px 3px}
+.pl td{padding:2px 3px;text-align:right;border-top:1px solid var(--line)}
+.pl th:nth-child(-n+3),.pl td:nth-child(-n+3){text-align:left}
+.pl td:first-child{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl td:nth-child(3){color:var(--dim);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl tr.side td{border-top:0;padding-top:6px;font-weight:700;text-align:left}
+.pl tr.side.h td{color:var(--home)}.pl tr.side.a td{color:var(--away)}
+.pl td.none{max-width:none;white-space:normal}
+.pl .none{color:var(--dim);font-size:13px;text-align:left}
+.pl td:nth-child(2){color:var(--dim);font-size:12px}
 .empty{grid-column:1/-1;padding:40px 10px;text-align:center;color:var(--dim)}
 footer{padding:0 20px 28px;color:var(--dim);font-size:13px;max-width:900px}
 footer p{margin:4px 0}
@@ -82,6 +95,7 @@ details{padding:0 20px 10px;color:var(--dim);font-size:13px}
 <main id="games"></main>
 <footer>
   <p>Datos: TeamRankings.com. El local se mide con sus números jugando en casa y la visita con sus números fuera. <span class="fb">*</span> = sin partidos en esa condición, se usa el promedio de la temporada.</p>
+  <p>Jugadores: C = carreras · H = hits · HR = jonrones · K pit = strikeouts lanzados por el pitcher; C, H y HR son de bateo. Totales de la temporada según TeamRankings. — = no aparece en la lista de líderes de esa estadística.</p>
   <p>Marcador A: local en casa vs visita fuera. B: promedio de temporada de ambos. C: últimos 3 partidos. Total = carreras local + carreras visita. Hándicap = local − visita; si es positivo, el local es favorito por esa cantidad.</p>
 </footer>
 
@@ -178,7 +192,59 @@ function calc(g) {
   </div>`;
 }
 
+// ---------- jugadores (llegan en una llamada aparte: /api/mlb?part=players) ----------
+let LAST = null, LAST_CACHE = false;
+let PLAYERS = null, PLAYERS_STATE = "loading", PLAYERS_ERR = "", PLAYERS_WARN = [];
+const PCACHE_KEY = "mlb-radar:players";
+const nint = (v) => (v == null || !isFinite(v) ? "—" : Number.isInteger(v) ? String(v) : v.toFixed(1));
+const mascot = (s) => { const w = String(s || "").trim().split(/\s+/); const two = ["Sox", "Jays"]; return w.length > 1 && two.includes(w[w.length - 1]) ? w.slice(-2).join(" ") : w[w.length - 1] || ""; };
+
+function playersBox(H, A) {
+  const part = (t, cls) => {
+    const list = PLAYERS && t.key ? PLAYERS[t.key] : null;
+    const head = `<tr class="side ${cls}"><td colspan="7">${esc(t.name)}</td></tr>`;
+    if (!list || !list.length) {
+      const msg = PLAYERS_STATE === "loading" ? "Cargando jugadores…"
+        : PLAYERS_STATE === "error" ? "No se pudieron cargar los jugadores (ver Avisos de datos arriba)"
+        : "Sin datos de jugadores";
+      return head + `<tr><td colspan="7" class="none">${msg}</td></tr>`;
+    }
+    return head + list.map((p) =>
+      `<tr><td title="${esc(p.name)}">${esc(p.name)}</td><td>${esc(p.pos || "—")}</td><td title="${esc(p.team)}">${esc(mascot(p.team))}</td>` +
+      `<td>${nint(p.runs)}</td><td>${nint(p.hits)}</td><td>${nint(p.hr)}</td><td>${nint(p.so)}</td></tr>`).join("");
+  };
+  return `<div class="pl"><h4>Jugadores clave: líderes de bateo y el pitcher con más ponches (hasta 5)</h4>
+    <table><tr><th>Jugador</th><th>Pos</th><th>Equipo</th><th title="Carreras anotadas">C</th><th title="Hits">H</th><th title="Jonrones">HR</th><th title="Strikeouts lanzados (pitcher)">K pit</th></tr>
+    ${part(H, "h")}${part(A, "a")}</table></div>`;
+}
+
+async function loadPlayers() {
+  PLAYERS_STATE = "loading"; if (LAST) render(LAST, LAST_CACHE);
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 25000);
+    const r = await fetch("/api/mlb?part=players", { signal: ctrl.signal });
+    clearTimeout(t);
+    let data;
+    try { data = await r.json(); } catch { throw new Error(`respuesta no válida (HTTP ${r.status})`); }
+    PLAYERS_WARN = data.warnings || [];
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    PLAYERS = data.players; PLAYERS_STATE = "ok";
+    try { localStorage.setItem(PCACHE_KEY, JSON.stringify(data)); } catch {}
+  } catch (e) {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(PCACHE_KEY) || "null"); } catch {}
+    if (saved && saved.players) { PLAYERS = saved.players; PLAYERS_STATE = "ok"; PLAYERS_WARN.push("Jugadores: se muestran datos guardados"); }
+    else {
+      PLAYERS_STATE = "error"; PLAYERS_ERR = e.name === "AbortError" ? "tiempo de espera agotado" : e.message;
+      if (!PLAYERS_WARN.length) PLAYERS_WARN = [`Jugadores: ${PLAYERS_ERR}`];
+    }
+  }
+  if (LAST) render(LAST, LAST_CACHE);
+}
+
 function render(data, fromCache) {
+  LAST = data; LAST_CACHE = fromCache;
   const el = $("#games");
   if (!data.games || !data.games.length) {
     el.innerHTML = `<div class="empty">No hay partidos de MLB en esta fecha. Elige otro día en el calendario de arriba.</div>`;
@@ -189,6 +255,7 @@ function render(data, fromCache) {
       <div class="teams">${teamRow(g.home, "home")}${teamRow(g.away, "away")}</div>
       <div class="boxes">${box(g.home, "home")}${box(g.away, "away")}</div>
       ${calc(g)}
+      ${playersBox(g.home, g.away)}
     </article>`).join("");
   }
   const when = new Date(data.updated).toLocaleString("es-EC");
@@ -198,7 +265,7 @@ function render(data, fromCache) {
     ? `No se pudo conectar con TeamRankings. Mostrando datos guardados del ${when}.`
     : `${data.games.length} partido(s) · actualizado ${when}`;
 
-  const w = data.warnings || [];
+  const w = [...(data.warnings || []), ...PLAYERS_WARN];
   $("#warnbox").hidden = !w.length;
   $("#warnlist").innerHTML = w.map((x) => `<li>${esc(x)}</li>`).join("");
 }
@@ -235,8 +302,10 @@ async function load() {
 
 $("#date").value = todayStr();
 $("#load").addEventListener("click", load);
+$("#load").addEventListener("click", loadPlayers);
 $("#date").addEventListener("change", load);
 load();
+loadPlayers();
 </script>
 </body>
 </html>
