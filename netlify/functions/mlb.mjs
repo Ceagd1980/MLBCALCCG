@@ -11,6 +11,23 @@ const URLS = {
 };
 const STAT_KEYS = ["runs", "hits", "hr", "outs"];
 
+// Estadísticas de jugadores (orden = columnas de la página)
+const PLAYER_STATS = {
+  runs: "https://www.teamrankings.com/mlb/player-stat/runs",
+  hits: "https://www.teamrankings.com/mlb/player-stat/hits",
+  hr: "https://www.teamrankings.com/mlb/player-stat/home-runs",
+  so: "https://www.teamrankings.com/mlb/player-stat/strikeouts",
+};
+const PLAYER_KEYS = Object.keys(PLAYER_STATS);
+const FILL_ORDER = ["hits", "runs", "hr", "so"]; // "so" = strikeouts lanzados (pitchers)
+const TOP_PLAYERS = 5;
+
+// Los 30 equipos como los escribe TeamRankings en calendario y estadísticas
+const MLB_TEAMS = ["Arizona", "Atlanta", "Baltimore", "Boston", "Chi Cubs", "Chi Sox", "Cincinnati",
+  "Cleveland", "Colorado", "Detroit", "Houston", "Kansas City", "LA Angels", "LA Dodgers", "Miami",
+  "Milwaukee", "Minnesota", "NY Mets", "NY Yankees", "Oakland", "Philadelphia", "Pittsburgh",
+  "San Diego", "SF Giants", "Seattle", "St. Louis", "Tampa Bay", "Texas", "Toronto", "Washington"];
+
 const HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -40,6 +57,8 @@ for (const g of ALIAS_GROUPS) for (const k of g) ALIAS[k] = g[0];
 
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z]/g, "");
 const key = (s) => { const k = norm(s); return ALIAS[k] || k; };
+const cleanTeam = (s) => String(s || "").replace(/\(\d+-\d+(-\d+)?\)/g, "").replace(/^#\d+\s+/, "").trim();
+const pkey = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z]/g, "");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function num(v) {
@@ -49,7 +68,7 @@ function num(v) {
 }
 
 // ---------- descarga con reintento y límite de tiempo ----------
-async function getHtml(url, tries = 2, timeoutMs = 4000) {
+async function getHtml(url, tries = 2, timeoutMs = 3500) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
     const ctrl = new AbortController();
@@ -208,6 +227,150 @@ function parseStat(html) {
 }
 
 // Búsqueda segura: exacta primero; parcial solo si hay UNA coincidencia (evita mezclar NY Mets / NY Yankees)
+// ---------- estadísticas de jugadores ----------
+// Busca la tabla con columnas de jugador, equipo y valor. Si la cabecera no las nombra,
+// las deduce del contenido (columna con nombres de personas, columna con equipos, última numérica).
+const RE_PLAYER = /player|^name$|athlete/i;
+const RE_TEAM = /team|school|college/i;
+const RE_VALUE = /^value$|per\s*game|^avg|average|^ppg$|^apg$|^rpg$|^pts$|^ast$|^reb$|points|assists|rebounds/i;
+
+function parsePlayers(html) {
+  const tables = parseTables(html).filter((t) => t.rows.length >= 3);
+  if (!tables.length) throw new Error("tabla de jugadores no encontrada");
+  let best = null;
+  for (const t of tables) {
+    const hi = t.rows.findIndex((r) => r.some((c) => RE_PLAYER.test(c)) && r.some((c) => RE_TEAM.test(c)));
+    let iP = -1, iT = -1, iV = -1, iPos = -1, start = 0;
+    if (hi >= 0) {
+      const hdr = t.rows[hi];
+      iP = hdr.findIndex((c) => RE_PLAYER.test(c));
+      iT = hdr.findIndex((c, i) => i !== iP && RE_TEAM.test(c));
+      iV = hdr.findIndex((c, i) => i !== iP && i !== iT && RE_VALUE.test(c));
+      iPos = hdr.findIndex((c) => /^pos/i.test(c));
+      start = hi + 1;
+    } else {
+      // Deducción por contenido: texto sin dígitos en 2 columnas (jugador = la que tiene más palabras)
+      const body = t.rows.filter((r) => r.length >= 3).slice(0, 30);
+      if (body.length < 3) continue;
+      const cols = Math.max(...body.map((r) => r.length));
+      const textCols = [];
+      for (let i = 0; i < cols; i++) {
+        const vals = body.map((r) => r[i] || "");
+        const txt = vals.filter((v) => /[a-z]/i.test(v) && !/\d/.test(v)).length;
+        const avgLen = vals.reduce((n, v) => n + v.length, 0) / vals.length;
+        // descarta columnas cortas tipo posición (G, F, C, G-F)
+        if (txt >= body.length * 0.8 && avgLen > 3) textCols.push({ i, uniq: new Set(vals).size / vals.length });
+      }
+      if (textCols.length < 2) continue;
+      // Jugador = la columna con más valores distintos (los equipos se repiten); empate = la primera
+      textCols.sort((x, y) => y.uniq - x.uniq || x.i - y.i);
+      iP = textCols[0].i; iT = textCols[1].i;
+    }
+    const byTeam = {};
+    let n = 0;
+    for (const r of t.rows.slice(start)) {
+      if (!r[iP] || !r[iT] || RE_PLAYER.test(r[iP])) continue;
+      let v = iV >= 0 ? num(r[iV]) : null;
+      if (v == null) for (let i = r.length - 1; i >= 0; i--) { if (i === iP || i === iT) continue; v = num(r[i]); if (v != null) break; }
+      if (v == null) continue;
+      const tk = key(cleanTeam(r[iT]));
+      (byTeam[tk] ||= {})[pkey(r[iP])] = { name: r[iP], team: r[iT], pos: iPos >= 0 ? r[iPos] : "", v };
+      n++;
+    }
+    if (!best || n > best.n) best = { n, byTeam };
+  }
+  if (!best || !best.n) throw new Error("tabla de jugadores no encontrada");
+  return best.byTeam;
+}
+
+// Las páginas de jugadores escriben el equipo con su apodo ("BYU Cougars", "Iowa State Cyclones",
+// "North Carolina Tar Heels"). Se quita el apodo palabra por palabra desde el final hasta que el
+// nombre coincide EXACTO con un equipo conocido; así "Iowa State Cyclones" nunca cae en "Iowa".
+// La página de jugadores usa el nombre completo ("New York Yankees", "Chicago White Sox",
+// "Toronto Blue Jays"). Se prueba el nombre entero y luego quitando el apodo (máx. 2 palabras)
+// hasta que coincide EXACTO con un equipo conocido. Nunca "NY Mets" con "NY Yankees".
+function teamFromPlayerPage(raw, known) {
+  const words = cleanTeam(raw).split(/\s+/).filter(Boolean);
+  for (let drop = 0; drop <= 2 && drop < words.length; drop++) {
+    const k = key(words.slice(0, words.length - drop).join(" "));
+    if (k && known.has(k)) return { k, drop };
+  }
+  return null;
+}
+
+function remapAllPlayers(players, known) {
+  const raws = new Map();
+  for (const map of Object.values(players)) {
+    if (!map) continue;
+    for (const [rawKey, plist] of Object.entries(map)) {
+      const team = Object.values(plist)[0].team;
+      if (raws.has(team)) continue;
+      raws.set(team, known.has(rawKey) ? { k: rawKey, drop: 0 } : teamFromPlayerPage(team, known));
+    }
+  }
+  const bestDrop = {};
+  for (const r of raws.values()) if (r) bestDrop[r.k] = Math.min(bestDrop[r.k] ?? 9, r.drop);
+  const out = {};
+  for (const [name, map] of Object.entries(players)) {
+    if (!map) { out[name] = null; continue; }
+    const m = {};
+    for (const plist of Object.values(map)) {
+      const r = raws.get(Object.values(plist)[0].team);
+      if (!r || r.drop !== bestDrop[r.k]) continue;
+      Object.assign((m[r.k] ||= {}), plist);
+    }
+    out[name] = m;
+  }
+  return out;
+}
+
+// Se elige primero al líder del equipo en cada estadística (carreras, hits, jonrones y el pitcher
+// con más strikeouts) y luego se completa hasta 5 con los siguientes bateadores en hits, carreras y jonrones.
+function teamPlayers(players, tk) {
+  const all = {};
+  for (const s of PLAYER_KEYS) {
+    const m = players[s]?.[tk];
+    if (!m) continue;
+    for (const [pk, p] of Object.entries(m)) {
+      const o = (all[pk] ||= { name: p.name, team: p.team, pos: p.pos || "" });
+      if (!o.pos && p.pos) o.pos = p.pos;
+      o[s] = p.v;
+    }
+  }
+  const ids = Object.keys(all);
+  if (!ids.length) return null;
+  const chosen = [];
+  const add = (pk) => { if (pk && !chosen.includes(pk) && chosen.length < TOP_PLAYERS) chosen.push(pk); };
+  const rank = (s) => ids.filter((pk) => all[pk][s] != null).sort((a, b) => all[b][s] - all[a][s]);
+  for (const s of PLAYER_KEYS) add(rank(s)[0]);
+  for (const s of FILL_ORDER) for (const pk of rank(s)) add(pk);
+  return chosen.map((pk) => {
+    const p = all[pk];
+    const o = { name: p.name, team: p.team, pos: p.pos };
+    for (const s of PLAYER_KEYS) o[s] = p[s] ?? null;
+    return o;
+  });
+}
+
+// Diagnóstico: /api/mlb?debug=players muestra cómo vienen las páginas de jugadores
+async function debugPlayers() {
+  const out = {};
+  await Promise.all(Object.entries(PLAYER_STATS).map(async ([k, u]) => {
+    try {
+      const r = await fetch(u, { headers: HEADERS });
+      const html = await r.text();
+      const tables = parseTables(html);
+      out[k] = {
+        url: u, status: r.status, bytes: html.length, tables: tables.length,
+        muestra: tables.slice(0, 3).map((t) => ({ filas: t.rows.length, primeras: t.rows.slice(0, 4) })),
+      };
+      try { const m = parsePlayers(html); out[k].equipos = Object.keys(m).length; out[k].ejemploEquipos = Object.keys(m).slice(0, 8); }
+      catch (e) { out[k].error = e.message; }
+    } catch (e) { out[k] = { url: u, error: e.message }; }
+  }));
+  return out;
+}
+
 function find(map, name) {
   if (!map) return null;
   const k = key(name);
@@ -224,8 +387,39 @@ const json = (body, status, extra = {}) =>
     headers: { "Content-Type": "application/json; charset=utf-8", ...extra },
   });
 
+// /api/mlb?part=players — jugadores de los 30 equipos, en una llamada aparte
+async function playersResponse() {
+  const warnings = [];
+  const res = await Promise.allSettled(PLAYER_KEYS.map((k) => getHtml(PLAYER_STATS[k], 2, 4000)));
+  let players = {};
+  res.forEach((r, i) => {
+    const k = PLAYER_KEYS[i];
+    if (r.status !== "fulfilled") { warnings.push(`jugadores ${k}: ${r.reason?.message || r.reason}`); players[k] = null; return; }
+    try { players[k] = parsePlayers(r.value); } catch (e) { warnings.push(`jugadores ${k}: ${e.message}`); players[k] = null; }
+  });
+  const known = new Set(MLB_TEAMS.map((t) => key(t)));
+  const sample = PLAYER_KEYS.map((k) => players[k]).filter(Boolean).slice(0, 1)
+    .flatMap((m) => Object.values(m).slice(0, 3).map((x) => Object.values(x)[0].team));
+  players = remapAllPlayers(players, known);
+  const byTeam = {};
+  for (const k of known) { const list = teamPlayers(players, k); if (list) byTeam[k] = list; }
+  if (PLAYER_KEYS.some((k) => players[k]) && !Object.keys(byTeam).length)
+    warnings.push(`Jugadores: las tablas cargaron pero ningún equipo coincidió. Ej.: ${sample.join(", ")}`);
+  const ok = Object.keys(byTeam).length > 0;
+  return json({ ok, updated: new Date().toISOString(), players: byTeam, warnings, error: ok ? undefined : "No se pudieron cargar los jugadores" },
+    ok ? 200 : 502,
+    ok ? {
+      "Cache-Control": "public, max-age=0, must-revalidate",
+      "Netlify-CDN-Cache-Control": "public, durable, s-maxage=1800, stale-while-revalidate=3600",
+      "Netlify-Vary": "query=part",
+    } : { "Cache-Control": "no-store" });
+}
+
 export default async (req) => {
   const url = new URL(req.url);
+  if (url.searchParams.get("debug") === "players")
+    return json(await debugPlayers(), 200, { "Cache-Control": "no-store" });
+  if (url.searchParams.get("part") === "players") return playersResponse();
   const date = url.searchParams.get("date");
   const validDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
   const scheduleUrl = `${BASE}/schedules/${validDate ? `?date=${validDate}` : ""}`;
@@ -265,6 +459,9 @@ export default async (req) => {
   const team = (name, rank) => {
     const t = { name, rank, standing: find(standings, name) };
     for (const k of STAT_KEYS) t[k] = find(stats[k], name);
+    // clave con la que la página busca a sus jugadores en /api/mlb?part=players
+    const kk = key(name);
+    t.key = MLB_TEAMS.some((x) => key(x) === kk) ? kk : (find(Object.fromEntries(MLB_TEAMS.map((x) => [key(x), key(x)])), name) || kk);
     const loaded = { standing: standings, ...stats };
     const missing = Object.keys(loaded).filter((k) => loaded[k] && !t[k]);
     if (missing.length && !warned.has(name)) {
