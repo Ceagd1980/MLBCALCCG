@@ -140,13 +140,21 @@ function parseSchedule(html) {
     const txt = (r[iM] || "").replace(/\(\d+-\d+\)/g, "").trim();
     const mm = txt.match(/^(?:#(\d+)\s+)?(.+?)\s+(at|vs\.?|@)\s+(?:#(\d+)\s+)?(.+)$/i);
     if (!mm) continue;
+    // Partido jugado: carreras junto a cada equipo ("NY Yankees 5 at NY Mets 3") o en otra celda ("5-3", "Final")
+    const splitScore = (raw) => { const m = /^(.*?[A-Za-z.)])\s+(\d{1,2})\s*$/.exec(raw.trim()); return m ? [m[1].trim(), +m[2]] : [raw.trim(), null]; };
+    let [away, awayScore] = splitScore(mm[2]);
+    let [home, homeScore] = splitScore(mm[5]);
+    if (awayScore == null || homeScore == null) { awayScore = homeScore = null; away = mm[2].trim(); home = mm[5].trim(); }
+    let time = iTime >= 0 ? r[iTime] || "" : "";
+    const scoreCell = r.find((c, i) => i !== iM && /^\D*\d{1,2}\s*[-–]\s*\d{1,2}\D*$/.test(c) && !/\d{1,2}:\d{2}/.test(c));
+    const result = awayScore == null ? (scoreCell ? scoreCell.trim() : /final/i.test(time) ? time : "") : "";
+    if (/final/i.test(time) || (scoreCell && time === scoreCell)) time = "";
     games.push({
-      away: mm[2].trim(),
+      away, home, awayScore, homeScore, result,
       awayRank: mm[1] ? +mm[1] : null,
-      home: mm[5].trim(),
       homeRank: mm[4] ? +mm[4] : null,
       neutral: !/^(at|@)$/i.test(mm[3]),
-      time: iTime >= 0 ? r[iTime] || "" : "",
+      time,
       location: iLoc >= 0 ? r[iLoc] || "" : "",
       hotness: iHot >= 0 ? num(r[iHot]) : null,
     });
@@ -173,6 +181,7 @@ function parseStandings(html) {
     if (iT < 0) iT = 0;
     const iRank = idx(/^rank$/i), iWL = idx(/overall|^w-l$/i), iPct = idx(/^pct$/i),
       iStreak = idx(/streak/i);
+    const iHome = idx(/^home$/i), iRoad = idx(/^road$|^away$/i); // récord en casa y fuera
 
     // Las filas de título ("AL East", "NL West"...) marcan la división y reinician la posición
     let div = null, pos = 0;
@@ -193,6 +202,8 @@ function parseStandings(html) {
         team: r[iT], pos, div: div || league,
         powerRank: iRank >= 0 ? num(r[iRank]) : null,
         record: iWL >= 0 ? r[iWL] : "",
+        homeRecord: iHome >= 0 ? r[iHome] : "",
+        roadRecord: iRoad >= 0 ? r[iRoad] : "",
         pct: iPct >= 0 ? num(r[iPct]) : null,
         streak: iStreak >= 0 ? r[iStreak] : "",
       };
@@ -473,6 +484,7 @@ export default async (req) => {
 
   const out = games.map((g) => ({
     time: g.time, location: g.location, hotness: g.hotness, neutral: g.neutral,
+    homeScore: g.homeScore, awayScore: g.awayScore, result: g.result,
     home: team(g.home, g.homeRank),
     away: team(g.away, g.awayRank),
   }));
