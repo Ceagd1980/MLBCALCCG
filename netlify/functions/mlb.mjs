@@ -466,6 +466,23 @@ function slugFor(k, slugs) {
   const hits = Object.keys(TEAM_SLUGS).filter((x) => x.startsWith(k) || k.startsWith(x));
   return hits.length === 1 ? TEAM_SLUGS[hits[0]] : null;
 }
+// Lista de equipos de TeamRankings ("Arizona Diamondbacks | Rankings, Stats"): nombre completo → dirección real
+const REAL_SLUGS = {};
+function realSlug(guess, html) {
+  if (!/team\s*links/i.test(html)) return null;
+  if (!Object.keys(REAL_SLUGS).length) {
+    const re = new RegExp(`/${FR_SPORT}/team/([a-z0-9-]+)`, "i");
+    for (const row of html.match(/<tr[\s\S]*?<\/tr>/gi) || []) {
+      const cell = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/i.exec(row);
+      const m = re.exec(row);
+      if (cell && m) { const n = decode(cell[1]).toLowerCase().replace(/[^a-z0-9]/g, ""); if (n && !REAL_SLUGS[n]) REAL_SLUGS[n] = m[1]; }
+    }
+  }
+  const g = guess.replace(/[^a-z0-9]/g, "");
+  if (REAL_SLUGS[g]) return REAL_SLUGS[g];
+  const hits = Object.keys(REAL_SLUGS).filter((n) => n.endsWith(g.slice(-6)) && (n.includes(g.slice(0, 4)) || g.includes(n.slice(0, 4))));
+  return hits.length === 1 ? REAL_SLUGS[hits[0]] : null;
+}
 // entries: [[clave, fecha de referencia]]; lee hasta 10 páginas a la vez sin pasarse del tiempo de Netlify
 async function loadForms(scheduleHtml, entries, T0, budgetMs = 9000) {
   const slugs = teamSlugs(scheduleHtml), out = {}, errs = [];
@@ -478,7 +495,17 @@ async function loadForms(scheduleHtml, entries, T0, budgetMs = 9000) {
       if (left < 1000) { skipped++; continue; }
       const slug = slugFor(k, slugs);
       if (!slug) { errs.push(`${k}: sin enlace de equipo`); continue; }
-      try { out[k] = parseForm(await frFetch(`https://www.teamrankings.com/${FR_SPORT}/team/${slug}`, Math.min(3500, left)), ref); if (!out[k]) errs.push(`${slug}: sin resultados`); }
+      try {
+        let html = await frFetch(`https://www.teamrankings.com/${FR_SPORT}/team/${slug}`, Math.min(3500, left));
+        out[k] = parseForm(html, ref);
+        // Dirección equivocada: TeamRankings muestra la lista de equipos; se busca ahí la dirección real
+        if (!out[k]) {
+          const real = realSlug(slug, html);
+          const left2 = budgetMs - (Date.now() - T0) - 250;
+          if (real && real !== slug && left2 >= 1000) { html = await frFetch(`https://www.teamrankings.com/${FR_SPORT}/team/${real}`, Math.min(3500, left2)); out[k] = parseForm(html, ref); }
+          if (!out[k]) errs.push(`${slug}: sin resultados${real && real !== slug ? ` (probé ${real})` : ""}`);
+        }
+      }
       catch (e) { errs.push(`${slug}: ${e.message}`); }
     }
   };
@@ -509,6 +536,8 @@ async function debugTeam(slug) {
   const r = await fetch(`https://www.teamrankings.com/${FR_SPORT}/team/${slug}`, { headers: HEADERS });
   const html = await r.text();
   const tables = parseTables(html);
+  const form = parseForm(html, ecToday()), real = form ? null : realSlug(slug, html);
+  if (real && real !== slug) return { pedido: slug, real, ...(await debugTeam(real)) };
   return { status: r.status, bytes: html.length, tables: tables.map((t) => ({ filas: t.rows.length, primeras: t.rows.slice(0, 4) })).slice(0, 6), form: parseForm(html, ecToday()) };
 }
 
