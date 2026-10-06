@@ -84,6 +84,10 @@ main{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:
 .flame.hot{background:var(--amber);color:#1a1300}
 .game.hot{border-color:var(--amber)}
 .chk{display:flex;align-items:center;gap:5px;color:var(--dim);font-size:14px;white-space:nowrap}
+.fr{font:700 12px Oswald;white-space:nowrap;display:inline-block;padding:0 5px;border-radius:4px;margin-left:6px;vertical-align:3px;cursor:help;background:#2a3263;color:var(--dim)}
+.fr.pos{background:#173d2a;color:var(--win)}.fr.neg{background:#45191d;color:var(--loss)}
+.final.hit{background:#0f2a1c}.final.miss{background:#2e1216}
+.mark{font:700 18px Oswald;margin-left:6px}
 .empty{grid-column:1/-1;padding:40px 10px;text-align:center;color:var(--dim)}
 footer{padding:0 20px 28px;color:var(--dim);font-size:13px;max-width:900px}
 footer p{margin:4px 0}
@@ -110,6 +114,7 @@ details{padding:0 20px 10px;color:var(--dim);font-size:13px}
   <p>Datos: TeamRankings.com. El local se mide con sus números jugando en casa y la visita con sus números fuera. <span class="fb">*</span> = sin partidos en esa condición, se usa el promedio de la temporada.</p>
   <p>Jugadores: C = carreras · H = hits · HR = jonrones · K pit = strikeouts lanzados por el pitcher; C, H y HR son de bateo. Totales de la temporada según TeamRankings. — = no aparece en la lista de líderes de esa estadística.</p>
   <p>% ganador: ganados ÷ jugados (General = récord total; LL = local en casa; VV = visita fuera). 1X2: Local = (ganados local + perdidos visita) ÷ partidos de ambos; Visita = (ganados visita + perdidos local) ÷ partidos de ambos. 🔥 = probabilidad del favorito (promedio General y LL/VV); los partidos van de mayor a menor confianza. ★ = interés del partido según TeamRankings. En días pasados se muestra el marcador final y si la 🔥 acertó.</p>
+  <p>🔥 Confianza: probabilidad 1X2 del favorito (promedio de General y LL/VV); desde 70% la llama y la tarjeta se resaltan. En partidos jugados: ✓ verde si ganó el favorito, ✗ rojo si no. FR = fuerza relativa: de los últimos 5 partidos, +1 por victoria y −1 por derrota (positivo = viene en racha ganadora).</p>
   <p>Marcador A: local en casa vs visita fuera. B: promedio de temporada de ambos. C: últimos 3 partidos. Total = carreras local + carreras visita. Hándicap = local − visita; si es positivo, el local es favorito por esa cantidad.</p>
 </footer>
 
@@ -154,13 +159,20 @@ function streakHtml(s) {
   return `<span class="${c}">${esc(s)}</span>`;
 }
 
+// Fuerza relativa: últimos 5 partidos, +1 por victoria y −1 por derrota (empate 0)
+function frHtml(f) {
+  if (!f || f.fr == null || !f.last || !f.last.length) return "";
+  const det = f.last.map((x) => x.wl + (x.score ? " " + x.score : "") + (x.date ? " (" + x.date.slice(5).split("-").reverse().join("/") + ")" : "")).join(", ");
+  const tip = `Fuerza relativa (últimos ${f.last.length}): ${f.last.map((x) => x.wl).join(" ")} → ${det}`;
+  return `<span class="fr ${f.fr > 0 ? "pos" : f.fr < 0 ? "neg" : ""}" title="${esc(tip)}">FR ${f.fr > 0 ? "+" : ""}${f.fr}</span>`;
+}
 function teamRow(t, side) {
   const st = t.standing;
   const pct = st && st.pct != null ? (st.pct * 100).toFixed(1) + "%" : "—";
   const pos = st ? `${st.pos}º ${st.div}` : "—";
   return `<div class="team">
     <span class="tag ${side === "home" ? "h" : "a"}">${side === "home" ? "LOCAL" : "VISITA"}</span>
-    <span class="name">${t.rank ? `<span class="rk">#${t.rank}</span>` : ""}${esc(t.name)}</span>
+    <span class="name">${t.rank ? `<span class="rk">#${t.rank}</span>` : ""}${esc(t.name)}${frHtml(t.form)}</span>
     <span class="info"><span class="pos">${pos}</span><span>${pct}</span>${streakHtml(st && st.streak)}</span>
   </div>`;
 }
@@ -218,19 +230,22 @@ function finalBox(g) {
     return g.result ? `<div class="final"><span>Final: <b>${esc(g.result)}</b></span></div>` : "";
   const hs = g.homeScore, as = g.awayScore, total = hs + as;
   const c = confidence(g);
-  let fav = "";
+  let fav = "", cls = "", mark = "";
   if (c && hs !== as) {
     const won = (c.side === "Local") === (hs > as);
-    fav = `<span class="chk2">🔥 ${c.side}: <span class="${won ? "ok" : "bad"}">${won ? "acertó" : "falló"}</span></span>`;
+    cls = won ? " hit" : " miss";
+    mark = `<span class="mark ${won ? "ok" : "bad"}" title="${won ? "Se acertó el ganador" : "No se acertó el ganador"}">${won ? "✓" : "✗"}</span>`;
+    fav = `<span class="chk2">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%: <span class="${won ? "ok" : "bad"}">${won ? "acertó" : "falló"}</span></span>`;
   }
   const lh = pick(g.home.runs, "home").v, la = pick(g.away.runs, "away").v;
   const proj = lh != null && la != null
     ? `<span class="chk2">Carreras totales ${total} · proyectado ${(lh + la).toFixed(2)} (${total > lh + la ? "Over" : "Under"}) · Diferencia real ${hs - as > 0 ? "+" : ""}${hs - as}</span>` : "";
-  return `<div class="final"><span>Final <span class="h">${esc(g.home.name)}</span> <b class="h">${hs}</b> – <b class="a">${as}</b> <span class="a">${esc(g.away.name)}</span></span>${fav}${proj}</div>`;
+  return `<div class="final${cls}"><span>Final <span class="h">${esc(g.home.name)}</span> <b class="h">${hs}</b> – <b class="a">${as}</b> <span class="a">${esc(g.away.name)}</span>${mark}</span>${fav}${proj}</div>`;
 }
 
 // Confianza 🔥: probabilidad 1X2 del favorito (promedio General y LL/VV)
-const HOT = 0.55;
+const HOT = 0.55; // filtro 🔥 +55%
+const HI = 0.70;  // desde 70% la llama se resalta
 function confidence(g) {
   const { xg, xs } = probs(g);
   const xs2 = [xg, xs].filter(Boolean);
@@ -333,7 +348,7 @@ function render(data, fromCache) {
       .filter((g) => !onlyHot || (g._conf && g._conf.p > HOT));
     el.innerHTML = !games.length
       ? `<div class="empty">Ningún partido de este día tiene un favorito con más de 55%. Desmarca 🔥 +55% para ver todos.</div>`
-      : games.map((g) => { const c = g._conf, hot = c && c.p > HOT; return `<article class="game${hot ? " hot" : ""}">
+      : games.map((g) => { const c = g._conf, hot = c && c.p >= HI; return `<article class="game${hot ? " hot" : ""}">
       <div class="meta"><span>${[g.time, g.location, g.neutral ? "neutral" : ""].filter(Boolean).map(esc).join(" · ")}${g.hotness != null ? ` · <span title="Interés del partido según TeamRankings (hotness)">★ ${f1(g.hotness)}</span>` : ""}</span>
         ${c ? `<span class="flame${hot ? " hot" : ""}" title="Confianza: probabilidad 1X2 del favorito (promedio General y LL/VV)">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%</span>` : ""}</div>
       ${finalBox(g)}
