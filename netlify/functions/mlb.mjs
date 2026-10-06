@@ -392,6 +392,126 @@ function find(map, name) {
   return hits.length === 1 ? map[hits[0]] : null;
 }
 
+// ---------- fuerza relativa (últimos 5 resultados) y marcadores de días pasados ----------
+// Se leen de la página de cada equipo en TeamRankings (/mlb/team/<slug>).
+const FR_SPORT = "mlb";
+const TEAM_SLUGS = Object.fromEntries([["Arizona", "arizona-diamondbacks"], ["Atlanta", "atlanta-braves"], ["Baltimore", "baltimore-orioles"], ["Boston", "boston-red-sox"], ["Chi Cubs", "chicago-cubs"], ["Chi Sox", "chicago-white-sox"], ["Cincinnati", "cincinnati-reds"], ["Cleveland", "cleveland-guardians"], ["Colorado", "colorado-rockies"], ["Detroit", "detroit-tigers"], ["Houston", "houston-astros"], ["Kansas City", "kansas-city-royals"], ["LA Angels", "los-angeles-angels"], ["LA Dodgers", "los-angeles-dodgers"], ["Miami", "miami-marlins"], ["Milwaukee", "milwaukee-brewers"], ["Minnesota", "minnesota-twins"], ["NY Mets", "new-york-mets"], ["NY Yankees", "new-york-yankees"], ["Oakland", "oakland-athletics"], ["Philadelphia", "philadelphia-phillies"], ["Pittsburgh", "pittsburgh-pirates"], ["San Diego", "san-diego-padres"], ["SF Giants", "san-francisco-giants"], ["Seattle", "seattle-mariners"], ["St. Louis", "st-louis-cardinals"], ["Tampa Bay", "tampa-bay-rays"], ["Texas", "texas-rangers"], ["Toronto", "toronto-blue-jays"], ["Washington", "washington-nationals"]].map(([n, s]) => [key(n), s]));
+function teamSlugs(html) {
+  const out = {};
+  const re = new RegExp(`<a[^>]*href="[^"]*/${FR_SPORT}/team/([a-z0-9-]+)[^"]*"[^>]*>([\\s\\S]*?)</a>`, "gi");
+  let m;
+  while ((m = re.exec(html || ""))) { const k = key(cleanTeam(decode(m[2]))); if (k && !out[k]) out[k] = m[1]; }
+  return out;
+}
+const FR_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+// "10/04", "10/04/2026", "Oct 4", "2026-10-04" → "2026-10-04" (si no trae año, el más cercano a la fecha consultada)
+function frIso(txt, refIso) {
+  const t = String(txt || "").trim();
+  let y = null, mo = null, d = null, m;
+  if ((m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t))) [y, mo, d] = [+m[1], +m[2], +m[3]];
+  else if ((m = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(t))) { mo = +m[1]; d = +m[2]; if (m[3]) y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; }
+  else if ((m = /([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})/.exec(t)) && FR_MONTHS[m[1].toLowerCase()]) { mo = FR_MONTHS[m[1].toLowerCase()]; d = +m[2]; }
+  if (!mo || !d) return null;
+  if (!y) { const [ry, rm] = refIso.split("-").map(Number); y = mo - rm > 6 ? ry - 1 : rm - mo > 6 ? ry + 1 : ry; }
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+// Resultados de la página del equipo: columna "Result" ("W 88-80", "L 3-5", "T 20-20") y "Date"
+function parseForm(html, beforeIso) {
+  const games = [];
+  let order = 0;
+  for (const t of parseTables(html)) {
+    const hi = t.rows.findIndex((r) => r.some((c) => /^(result|w\/l)$/i.test(c.trim())));
+    if (hi < 0) continue;
+    const hdr = t.rows[hi].map((c) => c.trim());
+    const iD = hdr.findIndex((c) => /^date$/i.test(c));
+    const iR = hdr.findIndex((c) => /^result$/i.test(c));
+    const iWL = hdr.findIndex((c) => /^w\/l$/i.test(c));
+    for (const r of t.rows.slice(hi + 1)) {
+      let wl = null;
+      const rc = iR >= 0 ? (r[iR] || "").trim() : "";
+      const m = /^([WLT])\b\s*(\d+)\s*[-–]\s*(\d+)/i.exec(rc);
+      if (m) wl = m[1].toUpperCase();
+      else if (iWL >= 0 && /^[WLT]$/i.test((r[iWL] || "").trim())) wl = r[iWL].trim().toUpperCase();
+      if (!wl) continue;
+      games.push({ date: iD >= 0 ? frIso(r[iD], beforeIso) : null, wl, order: order++, score: m ? `${m[2]}-${m[3]}` : "" });
+    }
+  }
+  const dated = games.length > 0 && games.every((g) => g.date);
+  const list = dated ? games.filter((g) => g.date < beforeIso).sort((a, b) => a.date.localeCompare(b.date) || a.order - b.order) : games;
+  const last = list.slice(-5);
+  const on = dated ? games.filter((g) => g.date === beforeIso).sort((a, b) => a.order - b.order).map((g) => ({ wl: g.wl, score: g.score })) : [];
+  if (!last.length && !on.length) return null;
+  return {
+    fr: last.length ? last.reduce((n, g) => n + (g.wl === "W" ? 1 : g.wl === "L" ? -1 : 0), 0) : null,
+    last: last.map((g) => ({ wl: g.wl, date: g.date, score: g.score })), on,
+  };
+}
+async function frFetch(url, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { headers: HEADERS, signal: ctrl.signal, redirect: "follow" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const html = await r.text();
+    if (!/<table/i.test(html)) throw new Error("la página no trae tablas");
+    return html;
+  } catch (e) {
+    throw e.name === "AbortError" ? new Error("tiempo de espera agotado") : e;
+  } finally { clearTimeout(timer); }
+}
+function ecToday() { return new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10); }
+function slugFor(k, slugs) {
+  if (slugs[k]) return slugs[k];
+  if (TEAM_SLUGS[k]) return TEAM_SLUGS[k];
+  const hits = Object.keys(TEAM_SLUGS).filter((x) => x.startsWith(k) || k.startsWith(x));
+  return hits.length === 1 ? TEAM_SLUGS[hits[0]] : null;
+}
+// entries: [[clave, fecha de referencia]]; lee hasta 10 páginas a la vez sin pasarse del tiempo de Netlify
+async function loadForms(scheduleHtml, entries, T0, budgetMs = 9000) {
+  const slugs = teamSlugs(scheduleHtml), out = {}, errs = [];
+  const queue = [...new Map(entries).entries()];
+  let skipped = 0;
+  const worker = async () => {
+    while (queue.length) {
+      const [k, ref] = queue.shift();
+      const left = budgetMs - (Date.now() - T0) - 250;
+      if (left < 1000) { skipped++; continue; }
+      const slug = slugFor(k, slugs);
+      if (!slug) { errs.push(`${k}: sin enlace de equipo`); continue; }
+      try { out[k] = parseForm(await frFetch(`https://www.teamrankings.com/${FR_SPORT}/team/${slug}`, Math.min(3500, left)), ref); if (!out[k]) errs.push(`${slug}: sin resultados`); }
+      catch (e) { errs.push(`${slug}: ${e.message}`); }
+    }
+  };
+  await Promise.all(Array.from({ length: 10 }, worker));
+  if (skipped) errs.push(`${skipped} equipo(s) sin leer por tiempo; pulsa Actualizar`);
+  return { out, errs };
+}
+// Completa el marcador de los partidos jugados que el calendario no trae (W/L del equipo + puntos)
+function fillScores(games, forms) {
+  const used = {};
+  for (const g of games) {
+    if (g.homeScore != null && g.awayScore != null) continue;
+    const kh = key(g.home), ka = key(g.away);
+    const ih = used[kh] || 0, ia = used[ka] || 0;
+    const fh = forms[kh]?.on?.[ih], fa = forms[ka]?.on?.[ia];
+    used[kh] = ih + 1; used[ka] = ia + 1;
+    const src = fh || (fa && { wl: fa.wl === "W" ? "L" : fa.wl === "L" ? "W" : "T", score: fa.score });
+    const m = src && /(\d+)-(\d+)/.exec(src.score || "");
+    if (!m) continue;
+    const hi = Math.max(+m[1], +m[2]), lo = Math.min(+m[1], +m[2]);
+    if (src.wl === "T") { if (hi !== lo) continue; g.homeScore = g.awayScore = hi; }
+    else if (hi === lo) continue;
+    else [g.homeScore, g.awayScore] = src.wl === "W" ? [hi, lo] : [lo, hi];
+    g.result = "";
+  }
+}
+async function debugTeam(slug) {
+  const r = await fetch(`https://www.teamrankings.com/${FR_SPORT}/team/${slug}`, { headers: HEADERS });
+  const html = await r.text();
+  const tables = parseTables(html);
+  return { status: r.status, bytes: html.length, tables: tables.map((t) => ({ filas: t.rows.length, primeras: t.rows.slice(0, 4) })).slice(0, 6), form: parseForm(html, ecToday()) };
+}
+
 const json = (body, status, extra = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -431,13 +551,21 @@ export default async (req) => {
   if (url.searchParams.get("debug") === "players")
     return json(await debugPlayers(), 200, { "Cache-Control": "no-store" });
   if (url.searchParams.get("part") === "players") return playersResponse();
+  if (url.searchParams.get("debug") === "team")
+    return json(await debugTeam(String(url.searchParams.get("slug") || "new-york-yankees").replace(/[^a-z0-9-]/g, "")), 200, { "Cache-Control": "no-store" });
+  const T0 = Date.now();
   const date = url.searchParams.get("date");
   const validDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
   const scheduleUrl = `${BASE}/schedules/${validDate ? `?date=${validDate}` : ""}`;
 
   const names = ["schedule", "standings", ...STAT_KEYS];
+  const refIso = validDate || ecToday();
+  const schedP = getHtml(scheduleUrl);
+  // En cuanto llega el calendario se leen las páginas de los equipos del día (fuerza relativa y marcadores)
+  const formsP = schedP.then((sh) => loadForms(sh, parseSchedule(sh).flatMap((g) => [[key(g.home), refIso], [key(g.away), refIso]]), T0))
+    .catch(() => ({ out: {}, errs: [] }));
   const results = await Promise.allSettled([
-    getHtml(scheduleUrl),
+    schedP,
     ...["standings", ...STAT_KEYS].map((k) => getHtml(URLS[k])),
   ]);
 
@@ -482,11 +610,14 @@ export default async (req) => {
     return t;
   };
 
+  const forms = await formsP;
+  if (forms.errs.length) warnings.push(`Fuerza relativa: ${forms.errs.join(" · ")}`);
+  fillScores(games, forms.out);
   const out = games.map((g) => ({
     time: g.time, location: g.location, hotness: g.hotness, neutral: g.neutral,
     homeScore: g.homeScore, awayScore: g.awayScore, result: g.result,
-    home: team(g.home, g.homeRank),
-    away: team(g.away, g.awayRank),
+    home: { ...team(g.home, g.homeRank), form: forms.out[key(g.home)] || null },
+    away: { ...team(g.away, g.awayRank), form: forms.out[key(g.away)] || null },
   }));
 
   return json(
